@@ -335,6 +335,61 @@ private:
       }
       s.push(result);
       };
+
+    builtIns[L"reshape"] = [this](Stack& s) {
+      if (s.size() < 2) {
+        std::wcerr << L"Error: Insufficient stack elements for reshape" << std::endl;
+        return;
+      }
+      Array shape = s.top(); s.pop();
+      Array data = s.top(); s.pop();
+
+      // Validate shape array
+      if (shape.empty() || shape.size() > 2) {
+        std::wcerr << L"Error: reshape requires a shape array of 1 or 2 dimensions" << std::endl;
+        return;
+      }
+      std::vector<int> dims;
+      for (const auto& elem : shape) {
+        if (!std::holds_alternative<double>(elem)) {
+          std::wcerr << L"Error: reshape shape must contain numeric values" << std::endl;
+          return;
+        }
+        double val = std::get<double>(elem);
+        if (val <= 0 || std::floor(val) != val) {
+          std::wcerr << L"Error: reshape dimensions must be positive integers" << std::endl;
+          return;
+        }
+        dims.push_back(static_cast<int>(val));
+      }
+
+      // Check if data size matches the product of shape dimensions
+      size_t total_size = dims[0];
+      if (dims.size() == 2) {
+        total_size *= dims[1];
+      }
+      if (data.size() != total_size) {
+        std::wcerr << L"Error: Data size does not match shape dimensions" << std::endl;
+        return;
+      }
+
+      Array result;
+      if (dims.size() == 1) {
+        // 1D reshape: copy data as-is
+        result = data;
+      }
+      else {
+        // 2D reshape: create nested arrays
+        for (size_t i = 0; i < dims[0]; ++i) {
+          Array row;
+          for (size_t j = 0; j < dims[1]; ++j) {
+            row.push_back(data[i * dims[1] + j]);
+          }
+          result.push_back(row);
+        }
+      }
+      s.push(result);
+      };
   }
 
   // Evaluate a sequence of tokens
@@ -470,7 +525,8 @@ public:
   }
 };
 
-int main() {
+int main()
+{
   // Attempt to set locale for Unicode support
   try {
     std::locale::global(std::locale("en_US.UTF-8"));
