@@ -152,23 +152,101 @@ private:
     return result;
   }
 
-  // Print a single array
-  void printArray(const Array& arr) {
-    std::wcout << L"[ ";
+  // Print a single array with pretty formatting
+  void printArray(const Array& arr, int indent = 0) {
+    // Print indentation
+    std::wcout << std::wstring(indent * 2, L' ');
+    std::wcout << L"[";
+
+    if (arr.empty()) {
+      std::wcout << L"]";
+      return;
+    }
+
+    bool isNested = false;
     for (const auto& elem : arr) {
-      std::visit([&](const auto& value) {
-        if constexpr (std::is_same_v<std::decay_t<decltype(value)>, Array>) {
-          printArray(value); // Recursive for nested arrays
+      if (std::holds_alternative<Array>(elem)) {
+        isNested = true;
+        break;
+      }
+    }
+
+    if (isNested) {
+      // Nested array: print each sub-array on a new line
+      std::wcout << L"\n";
+      for (size_t i = 0; i < arr.size(); ++i) {
+        std::visit([&](const auto& value) {
+          if constexpr (std::is_same_v<std::decay_t<decltype(value)>, Array>) {
+            printArray(value, indent + 1); // Recursive call with increased indent
+          }
+          else if constexpr (std::is_same_v<std::decay_t<decltype(value)>, double>) {
+            std::wcout << std::wstring((indent + 1) * 2, L' ') << value;
+          }
+          else if constexpr (std::is_same_v<std::decay_t<decltype(value)>, wchar_t>) {
+            std::wcout << std::wstring((indent + 1) * 2, L' ') << value;
+          }
+          else if constexpr (std::is_same_v<std::decay_t<decltype(value)>, String>) {
+            std::wcout << std::wstring((indent + 1) * 2, L' ') << L"\"" << value << L"\"";
+          }
+          }, arr[i]);
+        if (i < arr.size() - 1) {
+          std::wcout << L",\n";
         }
         else {
-          std::wcout << value << L" ";
+          std::wcout << L"\n";
         }
-        }, elem);
+      }
+      std::wcout << std::wstring(indent * 2, L' ') << L"]";
     }
-    std::wcout << L"]";
+    else {
+      // Flat array: print elements on the same line
+      for (size_t i = 0; i < arr.size(); ++i) {
+        std::visit([&](const auto& value) {
+          if constexpr (std::is_same_v<std::decay_t<decltype(value)>, Array>) {
+            printArray(value, indent); // Should not happen, but handle safely
+          }
+          else if constexpr (std::is_same_v<std::decay_t<decltype(value)>, double>) {
+            std::wcout << value;
+          }
+          else if constexpr (std::is_same_v<std::decay_t<decltype(value)>, wchar_t>) {
+            std::wcout << value;
+          }
+          else if constexpr (std::is_same_v<std::decay_t<decltype(value)>, String>) {
+            std::wcout << L"\"" << value << L"\"";
+          }
+          }, arr[i]);
+        if (i < arr.size() - 1) {
+          std::wcout << L" ";
+        }
+      }
+      std::wcout << L"]";
+    }
   }
 
-  // Apply binary operation with scalar extension
+  // Helper function to compute the shape of an array
+  void getShape(const Array& arr, std::vector<size_t>& shape) {
+    shape.push_back(arr.size());
+    if (!arr.empty() && std::holds_alternative<Array>(arr[0])) {
+      bool isUniform = true;
+      size_t firstSize = std::get<Array>(arr[0]).size();
+      for (size_t i = 1; i < arr.size(); ++i) {
+        if (!std::holds_alternative<Array>(arr[i]) || std::get<Array>(arr[i]).size() != firstSize) {
+          isUniform = false;
+          break;
+        }
+      }
+      if (isUniform) {
+        getShape(std::get<Array>(arr[0]), shape);
+      }
+    }
+  }
+
+  // Helper function to compare shapes
+  bool shapesEqual(const std::vector<size_t>& shape1, const std::vector<size_t>& shape2) {
+    return shape1 == shape2;
+  }
+
+  // Apply binary operation with scalar extension for N-D arrays
   void applyBinaryOp(Stack& s, const String& opName, std::function<double(double, double)> op) {
     if (s.size() < 2) {
       std::wcerr << L"Error: Insufficient stack elements for " << opName << std::endl;
@@ -178,68 +256,72 @@ private:
     Array a = s.top(); s.pop();
     Array result;
 
-    // Check if one operand is a scalar (single-element array with double) and the other is an array
-    bool aIsScalar = (a.size() == 1 && std::holds_alternative<double>(a[0]));
-    bool bIsScalar = (b.size() == 1 && std::holds_alternative<double>(b[0]));
+    // Check if operands are scalars
+    bool aIsScalar = (a.size() == 1 && !std::holds_alternative<Array>(a[0]) && std::holds_alternative<double>(a[0]));
+    bool bIsScalar = (b.size() == 1 && !std::holds_alternative<Array>(b[0]) && std::holds_alternative<double>(b[0]));
+
+    // Get shapes of operands
+    std::vector<size_t> shapeA, shapeB;
+    getShape(a, shapeA);
+    getShape(b, shapeB);
+
+    // Recursive helper to apply operation
+    std::function<Array(const Array&, const Array&, const std::vector<size_t>&)> applyOpRecursive =
+      [&](const Array& x, const Array& y, const std::vector<size_t>& shape) -> Array {
+      Array res;
+      if (shape.size() == 1) {
+        // Leaf level: apply operation element-wise
+        for (size_t i = 0; i < shape[0]; ++i) {
+          Element xElem = x.size() == 1 ? x[0] : x[i];
+          Element yElem = y.size() == 1 ? y[0] : y[i];
+          if (!std::holds_alternative<double>(xElem) || !std::holds_alternative<double>(yElem)) {
+            std::wcerr << L"Error: " << opName << L" requires numeric arguments" << std::endl;
+            return Array();
+          }
+          double yVal = std::get<double>(yElem);
+          if (opName == L"/" && yVal == 0.0) {
+            std::wcerr << L"Error: Division by zero" << std::endl;
+            return Array();
+          }
+          res.push_back(op(std::get<double>(xElem), yVal));
+        }
+      }
+      else {
+        // Nested level: recurse into sub-arrays
+        size_t size = shape[0];
+        std::vector<size_t> subShape(shape.begin() + 1, shape.end());
+        for (size_t i = 0; i < size; ++i) {
+          Array xSub = x.size() == 1 && std::holds_alternative<Array>(x[0]) ? std::get<Array>(x[0]) : std::get<Array>(x[i]);
+          Array ySub = y.size() == 1 && std::holds_alternative<Array>(y[0]) ? std::get<Array>(y[0]) : std::get<Array>(y[i]);
+          Array subRes = applyOpRecursive(xSub, ySub, subShape);
+          if (subRes.empty()) {
+            return Array(); // Propagate error
+          }
+          res.push_back(subRes);
+        }
+      }
+      return res;
+      };
 
     if (aIsScalar && !bIsScalar) {
-      // Scalar op Array: replicate scalar
-      double scalar = std::get<double>(a[0]);
-      for (const auto& elem : b) {
-        if (!std::holds_alternative<double>(elem)) {
-          std::wcerr << L"Error: " << opName << L" requires numeric arguments" << std::endl;
-          return;
-        }
-        double val = std::get<double>(elem);
-        if (opName == L"/" && val == 0.0) {
-          std::wcerr << L"Error: Division by zero" << std::endl;
-          return;
-        }
-        result.push_back(op(scalar, val));
-      }
+      // Scalar op Array: replicate scalar to match b's shape
+      result = applyOpRecursive(a, b, shapeB);
     }
     else if (bIsScalar && !aIsScalar) {
-      // Array op Scalar: replicate scalar
-      double scalar = std::get<double>(b[0]);
-      if (opName == L"/" && scalar == 0.0) {
-        std::wcerr << L"Error: Division by zero" << std::endl;
-        return;
-      }
-      for (const auto& elem : a) {
-        if (!std::holds_alternative<double>(elem)) {
-          std::wcerr << L"Error: " << opName << L" requires numeric arguments" << std::endl;
-          return;
-        }
-        result.push_back(op(std::get<double>(elem), scalar));
-      }
+      // Array op Scalar: replicate scalar to match a's shape
+      result = applyOpRecursive(a, b, shapeA);
     }
-    else if (a.size() == 1 && b.size() == 1 && std::holds_alternative<double>(a[0]) && std::holds_alternative<double>(b[0])) {
-      // Scalar op Scalar
-      double val_b = std::get<double>(b[0]);
-      if (opName == L"/" && val_b == 0.0) {
-        std::wcerr << L"Error: Division by zero" << std::endl;
-        return;
-      }
-      result.push_back(op(std::get<double>(a[0]), std::get<double>(b[0])));
+    else if (shapesEqual(shapeA, shapeB)) {
+      // Array op Array: must have same shape
+      result = applyOpRecursive(a, b, shapeA);
     }
     else {
-      // Array op Array (must be same length)
-      if (a.size() != b.size()) {
-        std::wcerr << L"Error: " << opName << L" requires arrays of equal length or one scalar" << std::endl;
-        return;
-      }
-      for (size_t i = 0; i < a.size(); ++i) {
-        if (!std::holds_alternative<double>(a[i]) || !std::holds_alternative<double>(b[i])) {
-          std::wcerr << L"Error: " << opName << L" requires numeric arguments" << std::endl;
-          return;
-        }
-        double val_b = std::get<double>(b[i]);
-        if (opName == L"/" && val_b == 0.0) {
-          std::wcerr << L"Error: Division by zero" << std::endl;
-          return;
-        }
-        result.push_back(op(std::get<double>(a[i]), std::get<double>(b[i])));
-      }
+      std::wcerr << L"Error: " << opName << L" requires a scalar or arrays of equal shape" << std::endl;
+      return;
+    }
+
+    if (result.empty()) {
+      return; // Error already reported
     }
     s.push(result);
   }
@@ -345,11 +427,12 @@ private:
       Array data = s.top(); s.pop();
 
       // Validate shape array
-      if (shape.empty() || shape.size() > 2) {
-        std::wcerr << L"Error: reshape requires a shape array of 1 or 2 dimensions" << std::endl;
+      if (shape.empty()) {
+        std::wcerr << L"Error: reshape requires a non-empty shape array" << std::endl;
         return;
       }
-      std::vector<int> dims;
+      std::vector<size_t> dims;
+      size_t total_size = 1;
       for (const auto& elem : shape) {
         if (!std::holds_alternative<double>(elem)) {
           std::wcerr << L"Error: reshape shape must contain numeric values" << std::endl;
@@ -360,33 +443,176 @@ private:
           std::wcerr << L"Error: reshape dimensions must be positive integers" << std::endl;
           return;
         }
-        dims.push_back(static_cast<int>(val));
+        size_t dim = static_cast<size_t>(val);
+        dims.push_back(dim);
+        total_size *= dim;
       }
 
       // Check if data size matches the product of shape dimensions
-      size_t total_size = dims[0];
-      if (dims.size() == 2) {
-        total_size *= dims[1];
-      }
       if (data.size() != total_size) {
         std::wcerr << L"Error: Data size does not match shape dimensions" << std::endl;
         return;
       }
 
-      Array result;
-      if (dims.size() == 1) {
-        // 1D reshape: copy data as-is
-        result = data;
-      }
-      else {
-        // 2D reshape: create nested arrays
-        for (size_t i = 0; i < dims[0]; ++i) {
-          Array row;
-          for (size_t j = 0; j < dims[1]; ++j) {
-            row.push_back(data[i * dims[1] + j]);
+      // Recursive helper to build nested arrays
+      std::function<Array(size_t, const std::vector<size_t>&, size_t&)> buildArray =
+        [&](size_t dimIdx, const std::vector<size_t>& dims, size_t& dataIdx) -> Array {
+        Array result;
+        if (dimIdx == dims.size() - 1) {
+          // Leaf level: add elements directly
+          for (size_t i = 0; i < dims[dimIdx]; ++i) {
+            if (dataIdx < data.size()) {
+              result.push_back(data[dataIdx++]);
+            }
           }
-          result.push_back(row);
         }
+        else {
+          // Nested level: create sub-arrays
+          for (size_t i = 0; i < dims[dimIdx]; ++i) {
+            result.push_back(buildArray(dimIdx + 1, dims, dataIdx));
+          }
+        }
+        return result;
+        };
+
+      size_t dataIdx = 0;
+      Array result = buildArray(0, dims, dataIdx);
+      s.push(result);
+      };
+
+    builtIns[L"dim"] = [this](Stack& s) {
+      if (s.empty()) {
+        std::wcerr << L"Error: Stack empty for dim" << std::endl;
+        return;
+      }
+      Array arr = s.top(); s.pop();
+      Array result;
+
+      // Scalar: single-element array with non-Array element
+      if (arr.size() == 1 && !std::holds_alternative<Array>(arr[0])) {
+        // Empty array for scalar
+        s.push(result);
+        return;
+      }
+
+      // Recursive helper to compute dimensions
+      std::function<void(const Array&, std::vector<size_t>&)> getDims =
+        [&](const Array& current, std::vector<size_t>& dims) {
+        if (current.empty()) {
+          dims.push_back(0);
+          return;
+        }
+        dims.push_back(current.size());
+        // Check if elements are arrays and uniform
+        bool hasArrays = false;
+        size_t subSize = 0;
+        for (size_t i = 0; i < current.size(); ++i) {
+          if (std::holds_alternative<Array>(current[i])) {
+            Array subArr = std::get<Array>(current[i]);
+            if (i == 0) {
+              subSize = subArr.size();
+              hasArrays = true;
+            }
+            else if (subArr.size() != subSize) {
+              std::wcerr << L"Error: Non-uniform array for dim" << std::endl;
+              s.push(result); // Push empty result before returning
+              return;
+            }
+          }
+          else if (i == 0) {
+            // First element is not an array, treat as 1D
+            return;
+          }
+          else {
+            // Mixed types (array and non-array), treat as non-uniform
+            std::wcerr << L"Error: Non-uniform array for dim" << std::endl;
+            s.push(result); // Push empty result before returning
+            return;
+          }
+        }
+        if (hasArrays) {
+          // Recurse into the first sub-array
+          getDims(std::get<Array>(current[0]), dims);
+        }
+        };
+
+      std::vector<size_t> dims;
+      getDims(arr, dims);
+      // Check if an error occurred (dims unchanged due to early return)
+      if (dims.empty() && !result.empty()) {
+        return; // Error already handled
+      }
+      for (size_t dim : dims) {
+        result.push_back(static_cast<double>(dim));
+      }
+      s.push(result);
+      };
+
+    builtIns[L"matmul"] = [this](Stack& s) {
+      if (s.size() < 2) {
+        std::wcerr << L"Error: Insufficient stack elements for matmul" << std::endl;
+        return;
+      }
+      Array b = s.top(); s.pop();
+      Array a = s.top(); s.pop();
+
+      // Validate that inputs are 2D arrays
+      std::vector<size_t> shapeA, shapeB;
+      getShape(a, shapeA);
+      getShape(b, shapeB);
+      if (shapeA.size() != 2 || shapeB.size() != 2) {
+        std::wcerr << L"Error: matmul requires 2D arrays" << std::endl;
+        return;
+      }
+
+      // Validate dimensions: a is [m, n], b is [n, p]
+      size_t m = shapeA[0], n = shapeA[1];
+      size_t n_b = shapeB[0], p = shapeB[1];
+      if (n != n_b) {
+        std::wcerr << L"Error: Incompatible dimensions for matmul" << std::endl;
+        return;
+      }
+
+      // Validate that all elements are numeric
+      for (const auto& row : a) {
+        if (!std::holds_alternative<Array>(row)) {
+          std::wcerr << L"Error: matmul requires 2D numeric arrays" << std::endl;
+          return;
+        }
+        for (const auto& elem : std::get<Array>(row)) {
+          if (!std::holds_alternative<double>(elem)) {
+            std::wcerr << L"Error: matmul requires numeric elements" << std::endl;
+            return;
+          }
+        }
+      }
+      for (const auto& row : b) {
+        if (!std::holds_alternative<Array>(row)) {
+          std::wcerr << L"Error: matmul requires 2D numeric arrays" << std::endl;
+          return;
+        }
+        for (const auto& elem : std::get<Array>(row)) {
+          if (!std::holds_alternative<double>(elem)) {
+            std::wcerr << L"Error: matmul requires numeric elements" << std::endl;
+            return;
+          }
+        }
+      }
+
+      // Perform matrix multiplication
+      Array result;
+      for (size_t i = 0; i < m; ++i) {
+        Array row;
+        for (size_t j = 0; j < p; ++j) {
+          double sum = 0.0;
+          for (size_t k = 0; k < n; ++k) {
+            double a_val = std::get<double>(std::get<Array>(a[i])[k]);
+            double b_val = std::get<double>(std::get<Array>(b[k])[j]);
+            sum += a_val * b_val;
+          }
+          row.push_back(sum);
+        }
+        result.push_back(row);
       }
       s.push(result);
       };
