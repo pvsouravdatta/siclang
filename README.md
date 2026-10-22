@@ -52,7 +52,7 @@ siclang.exe  # On Windows
 # Define a function to greet world
 :greet "Hello " swap cat :end
 
-"world" factorial .  # Hello world
+"world" greet .  # Hello world
 ```
 
 ### Built-in Functions
